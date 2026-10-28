@@ -528,7 +528,7 @@ export function createAgentEventHandler({
             const message =
               (hasDisplayContent && !shouldSuppressSilent) || canvasOnly
                 ? projectChatTerminalMessage({
-                    runId: terminalRunId,
+                    runId: terminalDelivery.sourceRunId,
                     text,
                     displayText: terminalBuffer.displayText,
                     timestamp,

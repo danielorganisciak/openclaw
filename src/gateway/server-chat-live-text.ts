@@ -148,7 +148,8 @@ export function projectChatTerminalMessage(params: {
               canvasBlocks,
             ),
           }),
-      ...(idempotencyKey ? { __openclaw: { runId, idempotencyKey } } : {}),
+      // Transport may use a queued send's client alias; history owns the source run.
+      __openclaw: { runId, ...(idempotencyKey ? { idempotencyKey } : {}) },
     },
     canvasBlocks,
   );
