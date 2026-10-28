@@ -45,6 +45,17 @@ backup.
 
 ## Update implementation contract
 
+Managed systemd stops bound the native command by the selected unit's effective
+stop timeout plus five seconds. Unavailable or infinite policy uses the finite
+Gateway stop budget with a warning; a command timeout retains its reason code
+through the existing recovery path. This requires the installed updater to
+contain the fix. A candidate cannot change an older updater's stop command.
+Requester notices distinguish restart preparation from update completion. Failed
+runs report the failed phase, reason, and next action, and name the previous
+serving version only after recorded recovery verifies it. Maintenance refusals
+remove the known database path before public diagnostic projection so recorded
+holder details survive redaction and truncation. Claim formats are unchanged.
+
 When artifact-preserving SQLite inspection exhausts its stabilization attempts,
 update failures retain the final consistency reason code and attempt count in
 `openclaw update status` and the prepared failure report. The candidate worker
