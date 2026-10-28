@@ -233,10 +233,12 @@ it.each(["local", "repository"] as const)(
 it.each([
   { backend: "local", mode: "paged" },
   { backend: "local", mode: "interrupted" },
+  { backend: "local", mode: "interrupted-authorized" },
+  { backend: "local", mode: "interrupted-authorized-edits" },
   { backend: "repository", mode: "paged" },
   { backend: "repository", mode: "interrupted" },
 ] as const)(
-  "reconciles a $mode $backend update after authority ends",
+  "reconciles a $mode $backend update when recovering its accepted publication",
   async ({ backend, mode }) => {
     const { f, first, pullRequest, transport, observePush } =
       await prepareExistingPullRequest(backend);
@@ -272,7 +274,9 @@ it.each([
       }
       const response = await transport(argv, options);
       if (argv.includes("push") || argv.includes("graphql")) {
-        await observePush();
+        if (pullRequest.state === "open") {
+          await observePush();
+        }
         if (mode === "paged") {
           await f.revoke();
         }
@@ -280,7 +284,9 @@ it.each([
         recoveryScanStart = hostScans.mock.calls.length;
         acceptedWrites = [...f.externalWrites];
       }
-      return response;
+      return isPullCreation(argv) && readbackAvailable
+        ? commandResult(JSON.stringify({ html_url: first.url.replace(/\d+$/u, "125201") }))
+        : response;
     });
     const idempotencyKey = `${mode}-update`;
     const publication = f.coordinator.requestForSessionV2(f.request(idempotencyKey, f.guest));
@@ -328,6 +334,44 @@ it.each([
       acceptedWrites = [...f.externalWrites];
       // Closing the known PR cannot undo an accepted update.
       pullRequest.state = "closed";
+      if (mode.startsWith("interrupted-authorized")) {
+        const { cwd, git } = f.local!;
+        const laterEdits = mode === "interrupted-authorized-edits";
+        if (laterEdits) {
+          await fs.writeFile(path.join(cwd, "artifact.txt"), "staged later work\n");
+          await git("add", "artifact.txt");
+          await fs.writeFile(path.join(cwd, "artifact.txt"), "saved later work\n");
+        }
+        await fs.writeFile(path.join(cwd, "untracked.txt"), "saved untracked work\n");
+        const snapshot = () =>
+          Promise.all([
+            git("rev-parse", "HEAD"),
+            fs.readFile(path.join(cwd, ".git", "index")),
+            fs.readFile(path.join(cwd, "artifact.txt")),
+            fs.readFile(path.join(cwd, "untracked.txt")),
+          ]);
+        const saved = await snapshot();
+        readbackAvailable = true;
+        const restarted = f.restart();
+        await restarted.resumeSessionRequests();
+        expect(f.externalWrites).toEqual(acceptedWrites);
+        expect(await restarted.readAsync(requestId)).toMatchObject(
+          published(first.url, pullRequest.headSha),
+        );
+        expect(await snapshot()).toEqual(saved);
+        expect(await restarted.readAsync(first.requestId)).toEqual(first);
+        const next = await restarted.requestForSessionV2(f.request("explicit-new-pr", f.guest));
+        expect(next).toMatchObject(
+          published(first.url.replace(/\d+$/u, "125201"), await git("rev-parse", "HEAD")),
+        );
+        expect(next.requestId).not.toBe(requestId);
+        expect(f.publishedTitles).toEqual(["first-publication", "explicit-new-pr"]);
+        expect(await git("show", "HEAD:artifact.txt")).toBe(
+          laterEdits ? "saved later work" : "accepted second publication",
+        );
+        expect(pullRequest).toMatchObject({ state: "closed", headSha: saved[0] });
+        return;
+      }
       await f.revoke();
       expect(f.guest.assertCurrent).toThrow();
       readbackAvailable = true;

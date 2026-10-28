@@ -133,6 +133,7 @@ function parseGitHubPublicationPullRequests(raw: string) {
 export async function findGitHubPublicationPullRequest(
   params: GitHubPublicationPullRequestLookup & {
     headCommit: string;
+    readKnownPullRequestUrls?: () => Promise<readonly string[]>;
     recordObserved?: (url: string) => void | Promise<void>;
   },
 ): Promise<string | undefined> {
@@ -144,14 +145,21 @@ export async function findGitHubPublicationPullRequest(
       candidate.headRef === params.branch &&
       candidate.baseRef === params.baseBranch,
   );
-  const found =
+  let found =
     exact.find((candidate) => candidate.state === "open") ??
     exact.find(
       (candidate) => candidate.state === "closed" && candidate.body.includes(params.marker),
     );
+  if (!found && params.readKnownPullRequestUrls && exact.length > 0) {
+    // A continued PR keeps its original body marker. Its retained receipt and exact
+    // accepted head can settle a retried update even when the PR has since closed.
+    const known = await params.readKnownPullRequestUrls();
+    params.assertCurrent();
+    found = exact.find((candidate) => known.includes(candidate.url));
+  }
   if (found) {
     await params.recordObserved?.(found.url);
-    if (found.state === "closed") {
+    if (found.state === "closed" && found.body.includes(params.marker)) {
       params.assertCurrent();
       throw new GitHubPublicationKnownFailure(
         "GitHub pull request was closed before publication completed.",
