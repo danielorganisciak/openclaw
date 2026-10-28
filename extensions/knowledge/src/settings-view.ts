@@ -204,13 +204,7 @@ export async function settings(ui: Page, n: number, settingsTarget: HTMLElement)
                 );
               }
             }
-            effect.append(
-              el(
-                "p",
-                "Group chats still see only their own conversation’s knowledge.",
-                "knowledge-muted",
-              ),
-            );
+            effect.append(el("p", GROUP_ACCESS_NOTE, "knowledge-muted"));
           };
           submitLabel = () => "Share store";
           body.append(nameField, picks);
@@ -272,13 +266,7 @@ export async function settings(ui: Page, n: number, settingsTarget: HTMLElement)
                 ),
               );
             }
-            effect.append(
-              el(
-                "p",
-                "Group chats still see only their own conversation’s knowledge.",
-                "knowledge-muted",
-              ),
-            );
+            effect.append(el("p", GROUP_ACCESS_NOTE, "knowledge-muted"));
           };
           submitLabel = () => (target ? `Use ${target.label}` : "Use store");
           body.append(picks);
@@ -590,3 +578,7 @@ const grantsText = (count: number) =>
   count
     ? `${count} group conversation${count === 1 ? " has" : "s have"} owner-granted access; other group chats see only their own conversation’s knowledge.`
     : "Group chats see only their own conversation’s knowledge.";
+
+// Store-change dialogs: grants follow the agent, so granted chats reach the new store.
+const GROUP_ACCESS_NOTE =
+  "Group chats keep their own conversation’s knowledge, except those granted access under Conversation access: they read, or read and save, whichever store this agent uses.";
