@@ -1,3 +1,4 @@
+// probe: run this process test on unmodified main (throwaway PR, do not merge)
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
