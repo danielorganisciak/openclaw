@@ -13,6 +13,7 @@ import {
   setActivePluginRegistry,
 } from "../../plugins/runtime.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
 import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
 import type { NodeWorkerSupervisorNodeProof } from "../node-registry-private.js";
@@ -43,7 +44,14 @@ import { registerNativeDeviceDispatchTests } from "./sessions.dispatch.native-de
 // Install session-store fixtures before environment handlers load their session accessors.
 const environmentMethods = await import("./environments.js");
 const dispatchTestMocks = getDispatchTestMocks();
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
+  afterEach(async () => {
+    // Automatic session maintenance can retain shared-state readers after dispatch returns.
+    await closeOpenClawAgentDatabasesAsync();
+    await closeStateDatabaseForTest();
+    cleanup();
+  });
+});
 
 function useDeviceSession(agentRuntimeOverride?: string, sessionId = dispatchTestSessionId): void {
   dispatchTestMocks.resolveTarget.mockReturnValue(
@@ -391,131 +399,125 @@ describe("sessions.dispatch device targets", () => {
       "rotates the first host only after cleanup when it $name",
       async ({ afterAllocation, destroyFails, generation }) => {
         const root = tempDirs.make("openclaw-auto-device-retry-");
-        try {
-          const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
-          const placements = createWorkerSessionPlacementStore({ database, now: () => 1_000 });
-          const first = await createHarness(database, placements, { destroyFails });
-          // Pre-allocation failure advances twice; allocated teardown adds another generation.
-          const second = await createHarness(database, placements, {
-            environmentGeneration: generation,
-          });
-          const nodes = [
-            connectedNode("first", afterAllocation ? 2 : 3),
-            connectedNode("second", afterAllocation ? 1 : 2),
-          ];
-          vi.spyOn(environmentMethods, "listGatewayEnvironments").mockResolvedValue(
-            deviceEnvironments(nodes),
-          );
-          let dispatchStarted = false;
-          let firstAllocated = false;
-          const startDispatch = placements.startDispatch.bind(placements);
-          vi.spyOn(placements, "startDispatch").mockImplementation(async (...args) => {
-            const placement = await startDispatch(...args);
-            dispatchStarted = true;
-            return placement;
-          });
-          const availability = async (deviceId: string) => {
-            if (deviceId === "first") {
-              if (!afterAllocation && dispatchStarted) {
-                return { available: false, unavailableReason: "disconnected" as const };
-              }
-              if (afterAllocation && firstAllocated) {
-                return { available: true, node: connectedNode("first", 0) };
-              }
+        if (afterAllocation) {
+          // Exercise maintenance against warm shared preferences, as in a running Gateway.
+          openOpenClawStateDatabase();
+        }
+        const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
+        const placements = createWorkerSessionPlacementStore({ database, now: () => 1_000 });
+        const first = await createHarness(database, placements, { destroyFails });
+        // Pre-allocation failure advances twice; allocated teardown adds another generation.
+        const second = await createHarness(database, placements, {
+          environmentGeneration: generation,
+        });
+        const nodes = [
+          connectedNode("first", afterAllocation ? 2 : 3),
+          connectedNode("second", afterAllocation ? 1 : 2),
+        ];
+        vi.spyOn(environmentMethods, "listGatewayEnvironments").mockResolvedValue(
+          deviceEnvironments(nodes),
+        );
+        let dispatchStarted = false;
+        let firstAllocated = false;
+        const startDispatch = placements.startDispatch.bind(placements);
+        vi.spyOn(placements, "startDispatch").mockImplementation(async (...args) => {
+          const placement = await startDispatch(...args);
+          dispatchStarted = true;
+          return placement;
+        });
+        const availability = async (deviceId: string) => {
+          if (deviceId === "first") {
+            if (!afterAllocation && dispatchStarted) {
+              return { available: false, unavailableReason: "disconnected" as const };
             }
-            return { available: true, node: nodes.find((node) => node.nodeId === deviceId) };
-          };
-          for (const [harness, deviceId] of [
-            [first, "first"],
-            [second, "second"],
-          ] as const) {
-            bindDeviceWorkerAvailability(harness.environments, availability);
-            vi.mocked(harness.environments.createWithRequest).mockImplementation(async () => {
-              if (deviceId === "first") {
-                firstAllocated = true;
-              }
-              return {
-                ...harness.ready,
-                providerId: "device",
-                profileId: `device:${deviceId}`,
-                profileSnapshot: { install: "bundle", settings: { device: deviceId } },
-                nodeDeviceId: deviceId,
-                sshEndpoint: null,
-                sharedHost: true,
-              };
-            });
-            // Attachment resets the synthetic environment; preserve its paired-device binding.
-            const attach = vi.mocked(harness.environments.attachSession).getMockImplementation()!;
-            vi.mocked(harness.environments.attachSession).mockImplementation(async (...args) => {
-              const credential = await attach(...args);
-              harness.markEnvironmentNodeDeviceId(deviceId);
-              return credential;
-            });
+            if (afterAllocation && firstAllocated) {
+              return { available: true, node: connectedNode("first", 0) };
+            }
           }
-          const environments = {
-            ...first.environments,
-            get: (id: string) =>
-              id === first.ready.environmentId
-                ? first.environments.get(id)
-                : id === second.ready.environmentId
-                  ? second.environments.get(id)
-                  : undefined,
-          };
-          bindDeviceWorkerAvailability(environments, availability);
-          useDeviceSession(undefined, "session-1");
-          const respond = await invokeSessionDispatch(
-            makeDispatchTestContext({
-              nodeRegistry: {
-                get: (id: string) => nodes.find((node) => node.nodeId === id),
-              } as never,
-              workerPlacementDispatchService: {
-                dispatch: (...args) =>
-                  (args[0].deviceId === "first" ? first : second).service.dispatch(...args),
-              },
-              workerSessionPlacementService: placements,
-              workerEnvironmentService: environments as never,
-            }),
-            { autoDevice: true },
-          );
-
-          expect(first.environments.createWithRequest).toHaveBeenCalledTimes(
-            afterAllocation ? 1 : 0,
-          );
-          expect(first.environments.attachSession).not.toHaveBeenCalled();
-          expect(first.environments.destroy).toHaveBeenCalledTimes(afterAllocation ? 1 : 0);
-          expect(second.environments.createWithRequest).toHaveBeenCalledTimes(destroyFails ? 0 : 1);
-          expect(respond).toHaveBeenCalledWith(
-            !destroyFails,
-            destroyFails
-              ? undefined
-              : expect.objectContaining({
-                  placement: expect.objectContaining({
-                    runner: { kind: "device", status: "available", deviceId: "second" },
-                  }),
-                }),
-            destroyFails
-              ? expect.objectContaining({ message: expect.stringContaining("at capacity") })
-              : undefined,
-          );
-          expect(await placements.getAsync("session-1")).toMatchObject({
-            state: destroyFails ? "failed" : "active",
+          return { available: true, node: nodes.find((node) => node.nodeId === deviceId) };
+        };
+        for (const [harness, deviceId] of [
+          [first, "first"],
+          [second, "second"],
+        ] as const) {
+          bindDeviceWorkerAvailability(harness.environments, availability);
+          vi.mocked(harness.environments.createWithRequest).mockImplementation(async () => {
+            if (deviceId === "first") {
+              firstAllocated = true;
+            }
+            return {
+              ...harness.ready,
+              providerId: "device",
+              profileId: `device:${deviceId}`,
+              profileSnapshot: { install: "bundle", settings: { device: deviceId } },
+              nodeDeviceId: deviceId,
+              sshEndpoint: null,
+              sharedHost: true,
+            };
           });
-          if (!afterAllocation) {
-            const provision = vi.mocked(second.environments.createWithRequest).mock.calls[0]?.[0];
-            expect(provision?.idempotencyKey).toBe("session-dispatch:session-1:3");
-            expect(second.ready.environmentId).toBe(
-              deriveEnvironmentIntent(provision?.idempotencyKey ?? "missing").environmentId,
-            );
-            expect([...first.log, ...second.log]).toEqual(
-              expect.arrayContaining([
-                "placement:requested",
-                "placement:failed",
-                "placement:active",
-              ]),
-            );
-          }
-        } finally {
-          await closeStateDatabaseForTest();
+          // Attachment resets the synthetic environment; preserve its paired-device binding.
+          const attach = vi.mocked(harness.environments.attachSession).getMockImplementation()!;
+          vi.mocked(harness.environments.attachSession).mockImplementation(async (...args) => {
+            const credential = await attach(...args);
+            harness.markEnvironmentNodeDeviceId(deviceId);
+            return credential;
+          });
+        }
+        const environments = {
+          ...first.environments,
+          get: (id: string) =>
+            id === first.ready.environmentId
+              ? first.environments.get(id)
+              : id === second.ready.environmentId
+                ? second.environments.get(id)
+                : undefined,
+        };
+        bindDeviceWorkerAvailability(environments, availability);
+        useDeviceSession(undefined, "session-1");
+        const respond = await invokeSessionDispatch(
+          makeDispatchTestContext({
+            nodeRegistry: {
+              get: (id: string) => nodes.find((node) => node.nodeId === id),
+            } as never,
+            workerPlacementDispatchService: {
+              dispatch: (...args) =>
+                (args[0].deviceId === "first" ? first : second).service.dispatch(...args),
+            },
+            workerSessionPlacementService: placements,
+            workerEnvironmentService: environments as never,
+          }),
+          { autoDevice: true },
+        );
+
+        expect(first.environments.createWithRequest).toHaveBeenCalledTimes(afterAllocation ? 1 : 0);
+        expect(first.environments.attachSession).not.toHaveBeenCalled();
+        expect(first.environments.destroy).toHaveBeenCalledTimes(afterAllocation ? 1 : 0);
+        expect(second.environments.createWithRequest).toHaveBeenCalledTimes(destroyFails ? 0 : 1);
+        expect(respond).toHaveBeenCalledWith(
+          !destroyFails,
+          destroyFails
+            ? undefined
+            : expect.objectContaining({
+                placement: expect.objectContaining({
+                  runner: { kind: "device", status: "available", deviceId: "second" },
+                }),
+              }),
+          destroyFails
+            ? expect.objectContaining({ message: expect.stringContaining("at capacity") })
+            : undefined,
+        );
+        expect(await placements.getAsync("session-1")).toMatchObject({
+          state: destroyFails ? "failed" : "active",
+        });
+        if (!afterAllocation) {
+          const provision = vi.mocked(second.environments.createWithRequest).mock.calls[0]?.[0];
+          expect(provision?.idempotencyKey).toBe("session-dispatch:session-1:3");
+          expect(second.ready.environmentId).toBe(
+            deriveEnvironmentIntent(provision?.idempotencyKey ?? "missing").environmentId,
+          );
+          expect([...first.log, ...second.log]).toEqual(
+            expect.arrayContaining(["placement:requested", "placement:failed", "placement:active"]),
+          );
         }
       },
     );
@@ -666,52 +668,48 @@ describe("sessions.dispatch device targets", () => {
     "rejects a $name node before mutating placement or provisioning",
     async ({ nodes, expectedMessage, rejectedMessage }) => {
       const root = tempDirs.make("openclaw-session-dispatch-device-");
-      try {
-        const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
-        const placements = createWorkerSessionPlacementStore({ database, now: () => 1_000 });
-        const harness = await createHarness(database, placements);
-        const runtime = createDeviceWorkerRuntime({
-          getPairedDevice: async (deviceId) => pairedNode(deviceId),
-        });
-        runtime.bindNodeTransport({
-          getCurrentNode: async (nodeId) => nodes.find((node) => node.nodeId === nodeId),
-          listCurrentNodes: async () => nodes,
-          hasCurrentRunner: () => nodes.length > 0,
-          isCurrent: () => true,
-          invoke: async () => ({ ok: false }),
-        });
-        bindDeviceWorkerAvailability(harness.environments, runtime.resolveAvailability);
+      const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
+      const placements = createWorkerSessionPlacementStore({ database, now: () => 1_000 });
+      const harness = await createHarness(database, placements);
+      const runtime = createDeviceWorkerRuntime({
+        getPairedDevice: async (deviceId) => pairedNode(deviceId),
+      });
+      runtime.bindNodeTransport({
+        getCurrentNode: async (nodeId) => nodes.find((node) => node.nodeId === nodeId),
+        listCurrentNodes: async () => nodes,
+        hasCurrentRunner: () => nodes.length > 0,
+        isCurrent: () => true,
+        invoke: async () => ({ ok: false }),
+      });
+      bindDeviceWorkerAvailability(harness.environments, runtime.resolveAvailability);
 
-        useDeviceSession();
-        const respond = await invokeSessionDispatch(
-          makeDispatchTestContext({
-            workerPlacementDispatchService: harness.service,
-            workerSessionPlacementService: placements,
-            workerEnvironmentService: harness.environments as never,
-          }),
-          { deviceId: "device-1" },
-        );
+      useDeviceSession();
+      const respond = await invokeSessionDispatch(
+        makeDispatchTestContext({
+          workerPlacementDispatchService: harness.service,
+          workerSessionPlacementService: placements,
+          workerEnvironmentService: harness.environments as never,
+        }),
+        { deviceId: "device-1" },
+      );
 
-        const placement = await placements.getAsync(dispatchTestSessionId);
-        expect(placement).toBeUndefined();
-        expect(harness.environments.createWithRequest).not.toHaveBeenCalled();
-        expect(harness.environments.startTunnel).not.toHaveBeenCalled();
-        expect(respond).toHaveBeenCalledWith(
-          false,
-          undefined,
-          expect.objectContaining({
-            code: ErrorCodes.INVALID_REQUEST,
-            message: expect.stringContaining(expectedMessage),
-          }),
-        );
-        expect(respond).not.toHaveBeenCalledWith(
-          false,
-          undefined,
-          expect.objectContaining({ message: expect.stringContaining(rejectedMessage) }),
-        );
-      } finally {
-        await closeStateDatabaseForTest();
-      }
+      const placement = await placements.getAsync(dispatchTestSessionId);
+      expect(placement).toBeUndefined();
+      expect(harness.environments.createWithRequest).not.toHaveBeenCalled();
+      expect(harness.environments.startTunnel).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: ErrorCodes.INVALID_REQUEST,
+          message: expect.stringContaining(expectedMessage),
+        }),
+      );
+      expect(respond).not.toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({ message: expect.stringContaining(rejectedMessage) }),
+      );
     },
   );
 });
