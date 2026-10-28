@@ -17,10 +17,8 @@ const installers = [
   url: `https://github.com/${release}`,
 }));
 
-const writeExecutable = (filePath: string, lines: string[]): void =>
-  writeFileSync(filePath, ["#!/usr/bin/env bash", "set -euo pipefail", ...lines, ""].join("\n"), {
-    mode: 0o755,
-  });
+const executable = (lines: string[]) =>
+  ["#!/usr/bin/env bash", "set -euo pipefail", ...lines, ""].join("\n");
 
 function exec(command: string, args: string[], cwd = process.cwd(), env = process.env, code = 0) {
   const result = spawnSync(command, args, { cwd, env, encoding: "utf8" });
@@ -34,7 +32,8 @@ function makeFixture(version?: string) {
   const binDir = file("bin");
   const installDir = file("install directory");
   const archive = file("periphery.zip");
-  const stub = (name: string, lines: string[]) => writeExecutable(path.join(binDir, name), lines);
+  const stub = (name: string, lines: string[]) =>
+    writeFileSync(path.join(binDir, name), executable(lines), { mode: 0o755 });
   const env = {
     ...process.env,
     TMPDIR: root,
@@ -46,15 +45,12 @@ function makeFixture(version?: string) {
     writeFileSync(
       archive,
       makeStoredZip({
-        periphery: [
-          "#!/usr/bin/env bash",
-          "set -euo pipefail",
+        periphery: executable([
           'printf "%s\\n" "$0" "$@" >>"$TMPDIR/periphery-calls.txt"',
           '[[ "$#" -eq 1 && "$1" == "version" ]]',
           '[[ -f "$(dirname "$0")/libIndexStore.dylib" ]]',
           `printf "%s\\n" "${version}"`,
-          "",
-        ].join("\n"),
+        ]),
         "libIndexStore.dylib": "fixture index store\n",
         "LICENSE.md": "fixture license\n",
       }),
