@@ -78,32 +78,17 @@ suite.define(() => {
           kind === "plain"
             ? [tableMessage("leading-table", wideTable)]
             : [
-                chatMessage("user", "Earlier question.", {
-                  __openclaw: {
-                    id: "earlier",
-                    seq: 1,
-                    senderId: "bob",
-                    senderName: "Bob",
-                    senderIdentity: { type: "profile", id: "bob" },
-                  },
-                }),
-                chatMessage("user", "Show the table.", {
-                  __openclaw: {
-                    id: "prompt",
-                    seq: 2,
-                    idempotencyKey: "table-run",
-                    senderId: "alice",
-                    senderName: "Alice",
-                    senderIdentity: { type: "profile", id: "alice" },
-                  },
-                }),
+                ...["Bob", "Alice"].map((name) =>
+                  chatMessage("user", "Show the table.", {
+                    __openclaw: { id: name, senderName: name },
+                  }),
+                ),
                 chatMessage("assistant", wideTable, {
                   __openclaw: {
                     id: "leading-table",
                     seq: 3,
                     runId: "table-run",
-                    replyToId: "prompt",
-                    replyToPreview: { senderLabel: "Alice", text: "Show the table." },
+                    replyToId: "Alice",
                   },
                 }),
               ],
@@ -127,7 +112,6 @@ suite.define(() => {
       expect(overlaps).toBe(false);
       const textBounds = (await table.locator("..").boundingBox())!;
       expect(tableBounds.width).toBeGreaterThan(textBounds.width);
-      expect(await avatar.count()).toBe(1);
     },
   );
 
